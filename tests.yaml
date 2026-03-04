@@ -3,12 +3,27 @@ tests:
   # ---------------------------------------------------------------------------
   # cloudwatch_decode
   #
-  # NOTE: parse_aws_cloudwatch_log_subscription_message expects GZIP-compressed
-  # bytes — the raw form that aws_kinesis_firehose produces after base64-decoding
-  # each Kinesis record. Binary data cannot be embedded in YAML log_fields, so
-  # the successful-parse path is not unit-testable here. Validate it with a live
-  # pipeline or an integration test that injects a real Firehose payload.
+  # parse_aws_cloudwatch_log_subscription_message does plain serde JSON parsing.
+  # The aws_kinesis_firehose source handles GZIP decompression before setting
+  # .message, so unit tests can inject plain JSON directly.
+  # The JSON must use camelCase keys (serde renames to snake_case on output).
   # ---------------------------------------------------------------------------
+
+  - name: "cloudwatch_decode: parses a valid CloudWatch Logs subscription message"
+    inputs:
+      - insert_at: cloudwatch_decode
+        type: log
+        log_fields:
+          message: '{"messageType":"DATA_MESSAGE","owner":"123456789012","logGroup":"/aws/lambda/my-fn","logStream":"2024/01/01/[$$LATEST]abc123","subscriptionFilters":["MyFilter"],"logEvents":[{"id":"37538531142362763","timestamp":1698876543000,"message":"INFO hello world"}]}'
+    outputs:
+      - extract_from: cloudwatch_decode
+        conditions:
+          - type: vrl
+            source: |
+              assert!(.log_group    == "/aws/lambda/my-fn")
+              assert!(.log_stream   == "2024/01/01/[$$LATEST]abc123")
+              assert!(.message_type == "DATA_MESSAGE")
+              assert!(is_array(.log_events))
 
   - name: "cloudwatch_decode: aborts on an invalid (non-JSON) message"
     inputs:
