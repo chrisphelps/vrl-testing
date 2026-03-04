@@ -1,0 +1,85 @@
+[sources.kinesis_http]
+type = "aws_kinesis_firehose"
+address = "0.0.0.0:8080"
+# Optional: set a shared secret for request authentication
+# access_key = "your-secret-key"
+
+[transforms.cloudwatch_decode]
+type = "remap"
+inputs = ["kinesis_http"]
+source = '''
+# Kinesis Firehose wraps CloudWatch Logs records in base64-encoded batches.
+# Decode the CloudWatch Logs subscription filter envelope.
+structured, err = parse_aws_cloudwatch_log_subscription_message(.)
+if err != null {
+  log("Failed to decode CloudWatch message: " + err, level: "error")
+  abort
+}
+
+# Expand each log event into its own event; flatten into top-level fields.
+. = structured
+'''
+
+[transforms.add_fields]
+type = "remap"
+inputs = ["cloudwatch_decode"]
+source = '''
+# --- Fixed enrichment fields ---
+# Adjust these values to suit your environment.
+.environment   = "production"
+.service       = "my-service"
+.team          = "platform"
+.datacenter    = "us-east-1"
+
+# Promote the CloudWatch log group / stream for easier querying.
+.log_group  = .logGroup
+.log_stream = .logStream
+
+# Parse the raw message string as JSON if possible, merging fields up.
+parsed, err = parse_json(.message)
+if err == null && is_object(parsed) {
+  . = merge(., parsed)
+}
+
+# Ensure @timestamp is an actual timestamp Vector understands.
+if !exists(.timestamp) {
+  .timestamp = now()
+}
+
+# Clean up redundant envelope fields.
+del(.logGroup)
+del(.logStream)
+del(.logEvents)
+del(.subscriptionFilters)
+del(.messageType)
+del(.owner)
+'''
+
+[sinks.elasticsearch]
+type       = "elasticsearch"
+inputs     = ["add_fields"]
+endpoints  = ["https://your-elasticsearch-host:9200"]
+index      = "cloudwatch-logs-%Y.%m.%d"
+
+# --- Authentication (choose one) ---
+# API key:
+# [sinks.elasticsearch.auth]
+# strategy = "basic"
+# user     = "elastic"
+# password = "changeme"
+
+# AWS-signed requests (for Amazon OpenSearch Service):
+# [sinks.elasticsearch.auth]
+# strategy = "aws"
+# region   = "us-east-1"
+
+[sinks.elasticsearch.bulk]
+action = "index"
+
+[sinks.elasticsearch.encoding]
+# timestamp_format controls how @timestamp is written.
+timestamp_format = "rfc3339"
+
+# Optional: route events to different indices by log group name.
+# [sinks.elasticsearch.request]
+# headers = {}

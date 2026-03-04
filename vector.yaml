@@ -1,0 +1,87 @@
+sources:
+  kinesis_http:
+    type: aws_kinesis_firehose
+    address: "0.0.0.0:8080"
+    store_access_key: false
+    # Optional: set a shared secret for request authentication
+    # access_key: "your-secret-key"
+
+transforms:
+  cloudwatch_decode:
+    type: remap
+    inputs: [kinesis_http]
+    source: |
+      # Kinesis Firehose wraps CloudWatch Logs records in base64-encoded batches.
+      # Decode the CloudWatch Logs subscription filter envelope.
+      structured, err = parse_aws_cloudwatch_log_subscription_message(.message)
+      if err != null {
+        log("Failed to decode CloudWatch message: " + err, level: "error")
+        abort
+      }
+
+      # Expand each log event into its own event; flatten into top-level fields.
+      . = structured
+
+  add_fields:
+    type: remap
+    inputs: [cloudwatch_decode]
+    source: |
+      # --- Fixed enrichment fields ---
+      # Adjust these values to suit your environment.
+      .environment = "production"
+      .service     = "my-service"
+      .team        = "platform"
+      .datacenter  = "us-east-1"
+
+      # parse_aws_cloudwatch_log_subscription_message already outputs snake_case
+      # field names (log_group, log_stream), so no renaming is needed.
+
+      # Parse the raw message string as JSON if possible, merging fields up.
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+      }
+
+      # Ensure .timestamp is always a proper timestamp type.
+      # Skip conversion if already a timestamp; parse string if present;
+      # fall back to now() if missing or unparseable.
+      if !is_timestamp(.timestamp) {
+        .timestamp = parse_timestamp(.timestamp, format: "%+") ?? now()
+      }
+
+      # Clean up redundant envelope fields.
+      del(.log_events)
+      del(.subscription_filters)
+      del(.message_type)
+      del(.owner)
+
+sinks:
+  elasticsearch:
+    type: elasticsearch
+    inputs: [add_fields]
+    endpoints:
+      - "https://your-elasticsearch-host:9200"
+
+    # --- Authentication (choose one) ---
+    # Basic credentials:
+    # auth:
+    #   strategy: basic
+    #   user: elastic
+    #   password: changeme
+
+    # AWS-signed requests (for Amazon OpenSearch Service):
+    # auth:
+    #   strategy: aws
+    #   region: us-east-1
+
+    bulk:
+      action: index
+      index: "cloudwatch-logs-%Y.%m.%d"
+
+    encoding:
+      # timestamp_format controls how @timestamp is written.
+      timestamp_format: rfc3339
+
+    # Optional: route events to different indices by log group name.
+    # request:
+    #   headers: {}

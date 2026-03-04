@@ -1,0 +1,144 @@
+tests:
+
+  # ---------------------------------------------------------------------------
+  # cloudwatch_decode
+  #
+  # NOTE: parse_aws_cloudwatch_log_subscription_message expects GZIP-compressed
+  # bytes — the raw form that aws_kinesis_firehose produces after base64-decoding
+  # each Kinesis record. Binary data cannot be embedded in YAML log_fields, so
+  # the successful-parse path is not unit-testable here. Validate it with a live
+  # pipeline or an integration test that injects a real Firehose payload.
+  # ---------------------------------------------------------------------------
+
+  - name: "cloudwatch_decode: aborts on an invalid (non-JSON) message"
+    inputs:
+      - insert_at: cloudwatch_decode
+        type: log
+        log_fields:
+          message: "this is not a cloudwatch message"
+    no_outputs_from:
+      - cloudwatch_decode
+
+  # ---------------------------------------------------------------------------
+  # add_fields
+  # Inputs are shaped like cloudwatch_decode output:
+  # parse_aws_cloudwatch_log_subscription_message produces snake_case field
+  # names — log_group, log_stream, log_events, message_type, subscription_filters.
+  # ---------------------------------------------------------------------------
+
+  - name: "add_fields: injects all fixed enrichment fields"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(.environment == "production")
+              assert!(.service     == "my-service")
+              assert!(.team        == "platform")
+              assert!(.datacenter  == "us-east-1")
+
+  - name: "add_fields: preserves log_group and log_stream from cloudwatch_decode"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(.log_group  == "/aws/lambda/my-fn")
+              assert!(.log_stream == "2024/01/01/[$$LATEST]abc123")
+
+  - name: "add_fields: removes envelope fields, keeps log_group and log_stream"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+          message_type: "DATA_MESSAGE"
+          owner: "123456789012"
+          subscription_filters: '["MyFilter"]'
+          log_events: '[{"id":"abc","timestamp":1698876543000,"message":"INFO"}]'
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(!exists(.message_type))
+              assert!(!exists(.owner))
+              assert!(!exists(.subscription_filters))
+              assert!(!exists(.log_events))
+              assert!(exists(.log_group))
+              assert!(exists(.log_stream))
+
+  - name: "add_fields: merges JSON message fields into the event"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+          message: '{"level":"info","request_id":"abc-123","latency_ms":42}'
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(.level      == "info")
+              assert!(.request_id == "abc-123")
+              assert!(.latency_ms == 42)
+
+  - name: "add_fields: handles a plain-text (non-JSON) message without error"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+          message: "plain text log line — not JSON"
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(.message     == "plain text log line — not JSON")
+              assert!(.environment == "production")
+
+  - name: "add_fields: adds a timestamp when the event has none"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(is_timestamp(.timestamp))
+
+  - name: "add_fields: preserves an existing timestamp"
+    inputs:
+      - insert_at: add_fields
+        type: log
+        log_fields:
+          log_group: "/aws/lambda/my-fn"
+          log_stream: "2024/01/01/[$$LATEST]abc123"
+          timestamp: "2024-01-15T10:30:00Z"
+    outputs:
+      - extract_from: add_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(.timestamp == t'2024-01-15T10:30:00Z')
